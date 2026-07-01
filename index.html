@@ -31,7 +31,7 @@
    CONFIGURACIÓN — edita estos valores antes de publicar
    ========================================================= */
 const CONFIG = {
-  GAS_URL: 'PON_AQUI_TU_URL_DE_APPS_SCRIPT_/exec',
+  GAS_URL: 'https://script.google.com/macros/s/AKfycbyk6s3AB2YCcymuInD_wrjJD9J9yw_OgONeaMMbdSHMLRUKo9MYyEDRq4Q83hHBkxLfrA/exec',
   PASSWORD_PANEL: 'diseno2024',
   HORA_CORTE: '14:30',                 // hora de corte para ajustes/urgencias del mismo día
   LIMITE_TICKETS_DISENADOR: 5,         // tickets activos antes de avisar sobrecarga
@@ -54,7 +54,7 @@ const ESTADOS = [
   { id:'Asignado', label:'Asignado', color:'bg-blue-50 text-blue-600 border-blue-100' },
   { id:'En Proceso', label:'Procesando', color:'bg-amber-50 text-amber-600 border-amber-100' },
   { id:'En Revisión', label:'Revisar', color:'bg-purple-50 text-purple-600 border-purple-100' },
-  { id:'Entregado', label:'Listo', color:'bg-emerald-50 text-emerald-600 border-emerald-100' }
+  { :'Entregado', label:'Listo', color:'bg-emerald-50 text-emerald-600 border-emerald-100' }
 ];
 
 const CLS_INPUT = "w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-black";
@@ -82,7 +82,7 @@ let state = {
 };
 
 /* =========================================================
-   UTILIDADES DE FECHA / SLA
+   UTILADES DE FECHA / SLA
    ========================================================= */
 function sumarDiasHabiles(fecha, dias){
   let d = new Date(fecha);
@@ -98,12 +98,12 @@ function minutosDeHoraTexto(txt){ const [h,m] = txt.split(':').map(Number); retu
 function minutosAhora(){ const n = new Date(); return n.getHours()*60 + n.getMinutes(); }
 function antesDeCorte(){ return minutosAhora() <= minutosDeHoraTexto(CONFIG.HORA_CORTE); }
 
-function calcularFechaSLA({ esAjuste, urgente, nivelId }){
+function calcularFechaSLA({ esAjuste, urgente, nivel }){
   const hoy = new Date();
   if(esAjuste || urgente){
     return formatoFecha(antesDeCorte() ? hoy : sumarDiasHabiles(hoy, 1));
   }
-  const nivel = NIVELES.find(n => n.id === nivelId) || NIVELES[1];
+  const nivel = NIVELES.find(n => n. === nivel) || NIVELES[1];
   return formatoFecha(sumarDiasHabiles(hoy, nivel.dias));
 }
 
@@ -115,7 +115,7 @@ function contarUrgentesEnFila(){
 }
 
 /* =========================================================
-   ALMACENAMIENTO LOCAL (identidad del dispositivo)
+   ALMACENAMIENTO LOCAL (entidad del dispositivo)
    ========================================================= */
 function getDeviceId(){
   let id = localStorage.getItem('deviceId');
