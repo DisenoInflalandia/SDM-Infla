@@ -13,8 +13,8 @@
  * 4. Copia la URL /exec resultante al CONFIG del index.html
  ****************************************************/
 
-const SHEET_ID = 'PON_AQUI_EL_ID_DE_TU_GOOGLE_SHEET';
-const DRIVE_FOLDER_ID = 'PON_AQUI_EL_ID_DE_TU_CARPETA_DE_DRIVE';
+const SHEET_ID = '1MrPIChgkHoNh7vznhaBS-ozRhFLuGXnqQOgHr-B8Ems';
+const DRIVE_FOLDER_ID = '1t1nNPzrY6t1XKyt7DSfZqaVlxtjHcWqr';
 
 // Estas claves definen el orden de las columnas en cada hoja mensual.
 // Si agregas un campo nuevo en el futuro, agrégalo aquí también (al final).
