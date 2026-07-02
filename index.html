@@ -31,7 +31,7 @@
    CONFIGURACIÓN — edita estos valores antes de publicar
    ========================================================= */
 const CONFIG = {
-  GAS_URL: 'https://script.google.com/macros/s/AKfycbyk6s3AB2YCcymuInD_wrjJD9J9yw_OgONeaMMbdSHMLRUKo9MYyEDRq4Q83hHBkxLfrA/exec',
+  GAS_URL: 'https://script.google.com/macros/s/AKfycbx-TkZOWBoej33Qi3Zn2n3gq0ccrnZ4vjIa_IobWZIKsYC2ccwkaTNjfcWwbBgk5ZdLmw/exec',
   PASSWORD_PANEL: 'diseno2024',
   HORA_CORTE: '14:30',                 // hora de corte para ajustes/urgencias del mismo día
   LIMITE_TICKETS_DISENADOR: 5,         // tickets activos antes de avisar sobrecarga
@@ -54,8 +54,11 @@ const ESTADOS = [
   { id:'Asignado', label:'Asignado', color:'bg-blue-50 text-blue-600 border-blue-100' },
   { id:'En Proceso', label:'Procesando', color:'bg-amber-50 text-amber-600 border-amber-100' },
   { id:'En Revisión', label:'Revisar', color:'bg-purple-50 text-purple-600 border-purple-100' },
-  { id:'Entregado', label:'Listo', color:'bg-emerald-50 text-emerald-600 border-emerald-100' }
+  { id:'Entregado', label:'Listo', color:'bg-emerald-50 text-emerald-600 border-emerald-100' },
+  { id:'Rechazado', label:'Rechazado', color:'bg-red-50 text-red-600 border-red-200' }
 ];
+// Flujo lineal normal (Rechazado queda fuera: es un estado especial, no se "avanza" hacia él)
+const FLUJO_ESTADOS = ['En Fila de Espera', 'Asignado', 'En Proceso', 'En Revisión', 'Entregado'];
 
 const CLS_INPUT = "w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-black";
 
@@ -72,17 +75,24 @@ let state = {
   busqueda: '',
   filtroMarca: 'Todas',
   filtroDisenador: 'Todos',
+  filtroSucursal: 'Todas',
   orden: 'urgencia',
+  ocultarCompletados: true,
   form: { marca:'', sucursal:'', solicitante:'', telefono:'', esAjuste:false, ticketPrevio:'', nivel:'Estandar', urgente:false, descripcion:'', referencia:'' },
   advertenciaUrgencia: false,
   advertenciaCarga: null,
   subiendoCaptura: false,
   mostrarComentario: null,
-  comentarioModal: ''
+  comentarioModal: '',
+  modoEdicion: false,
+  edicion: { descripcion:'', referencia:'', nivel:'Estandar', urgente:false },
+  previewLocal: null,
+  mostrarRechazo: null,
+  motivoRechazoTexto: ''
 };
 
 /* =========================================================
-   UTILADES DE FECHA / SLA
+   UTILIDADES DE FECHA / SLA
    ========================================================= */
 function sumarDiasHabiles(fecha, dias){
   let d = new Date(fecha);
@@ -115,20 +125,12 @@ function contarUrgentesEnFila(){
 }
 
 /* =========================================================
-   ALMACENAMIENTO LOCAL (entidad del dispositivo)
+   ALMACENAMIENTO LOCAL (identidad del dispositivo)
    ========================================================= */
 function getDeviceId(){
   let id = localStorage.getItem('deviceId');
   if(!id){ id = 'dev-' + Math.random().toString(36).slice(2) + Date.now(); localStorage.setItem('deviceId', id); }
   return id;
-}
-function getMisFolios(){
-  try{ return JSON.parse(localStorage.getItem('misFolios') || '[]'); } catch(e){ return []; }
-}
-function agregarMiFolio(folio){
-  const arr = getMisFolios();
-  arr.unshift(folio);
-  localStorage.setItem('misFolios', JSON.stringify(arr.slice(0, 80)));
 }
 
 /* =========================================================
@@ -186,7 +188,6 @@ async function enviarSolicitud(confirmadoUrgente){
   try{
     const res = await apiPost(payload);
     if(res.ok){
-      agregarMiFolio(res.ticket.folio);
       mostrarToast('¡Solicitud enviada! Folio ' + res.ticket.folio);
       state.form = { marca:'', sucursal:'', solicitante:f.solicitante, telefono:f.telefono, esAjuste:false, ticketPrevio:'', nivel:'Estandar', urgente:false, descripcion:'', referencia:'' };
       state.advertenciaUrgencia = false;
@@ -250,8 +251,9 @@ function confirmarAsignacionConCarga(retrasar){
 function avanzarEstado(folio){
   const t = state.tickets.find(x => x.folio === folio);
   if(!t) return;
-  const idx = ESTADOS.findIndex(e => e.id === t.estado);
-  if(idx < ESTADOS.length - 1) actualizarCampos(folio, { estado: ESTADOS[idx+1].id });
+  const idx = FLUJO_ESTADOS.indexOf(t.estado);
+  if(idx === -1 || idx >= FLUJO_ESTADOS.length - 1) return; // ya está al final o es un estado especial (ej. Rechazado)
+  actualizarCampos(folio, { estado: FLUJO_ESTADOS[idx+1] });
 }
 
 function comprimirImagen(file){
@@ -289,6 +291,7 @@ async function manejarCaptura(folio, file){
       const t = state.tickets.find(x => x.folio === folio);
       if(t) Object.assign(t, campos);
       if(state.ticketSel && state.ticketSel.folio === folio) Object.assign(state.ticketSel, campos);
+      if(state.previewLocal){ URL.revokeObjectURL(state.previewLocal); state.previewLocal = null; }
       mostrarToast('Captura subida. El solicitante ya puede revisarla.');
     } else {
       mostrarToast('Error al subir captura: ' + res.error, 'error');
@@ -323,11 +326,69 @@ async function pedirCambios(folio, comentario){
       fechaEntregaEstimada, creadorId:getDeviceId()
     });
     if(res.ok){
-      agregarMiFolio(res.ticket.folio);
       mostrarToast('Se registró tu solicitud de cambios (' + res.ticket.folio + ').');
       refrescar(true);
     }
   } catch(e){ mostrarToast('No se pudo registrar el ajuste.', 'error'); }
+}
+
+/* =========================================================
+   ACCIONES: EDITAR / ELIMINAR (solo mientras "En Fila de Espera")
+   ========================================================= */
+function iniciarEdicion(t){
+  state.modoEdicion = true;
+  state.edicion = { descripcion: t.descripcion || '', referencia: t.referencia || '', nivel: t.complejidad || 'Estandar', urgente: t.urgente === 'SI' };
+  render();
+}
+function cancelarEdicion(){ state.modoEdicion = false; render(); }
+
+async function guardarEdicion(folio){
+  const e = state.edicion;
+  if(!e.descripcion || !e.descripcion.trim()){ mostrarToast('La descripción no puede quedar vacía.', 'error'); return; }
+  const t = state.tickets.find(x => x.folio === folio);
+  if(!t) return;
+  const esAjuste = t.esAjuste === 'SI';
+  const fechaEntregaEstimada = calcularFechaSLA({ esAjuste, urgente: e.urgente, nivelId: e.nivel });
+  await actualizarCampos(folio, {
+    descripcion: e.descripcion,
+    referencia: e.referencia,
+    complejidad: esAjuste ? t.complejidad : e.nivel,
+    urgente: e.urgente ? 'SI' : 'NO',
+    fechaEntregaEstimada
+  });
+  state.modoEdicion = false;
+  mostrarToast('Solicitud actualizada.');
+  render();
+}
+
+async function eliminarTicket(folio){
+  if(!confirm('¿Seguro que quieres eliminar esta solicitud? Esta acción no se puede deshacer.')) return;
+  try{
+    const res = await apiPost({ accion:'borrar', folio });
+    if(res.ok){
+      state.tickets = state.tickets.filter(t => t.folio !== folio);
+      state.ticketSel = null;
+      mostrarToast('Solicitud eliminada.');
+      render();
+    } else {
+      mostrarToast('Error al eliminar: ' + res.error, 'error');
+    }
+  } catch(e){ mostrarToast('No se pudo eliminar. Revisa tu conexión.', 'error'); }
+}
+
+/* =========================================================
+   ACCIONES: RECHAZAR (diseñador, con motivo)
+   ========================================================= */
+function abrirRechazo(folio){ state.mostrarRechazo = folio; state.motivoRechazoTexto = ''; render(); }
+function cancelarRechazo(){ state.mostrarRechazo = null; render(); }
+function confirmarRechazo(folio){
+  const motivo = state.motivoRechazoTexto;
+  if(!motivo || !motivo.trim()){ mostrarToast('Escribe el motivo del rechazo.', 'error'); return; }
+  actualizarCampos(folio, { estado:'Rechazado', motivoRechazo: motivo });
+  state.mostrarRechazo = null;
+  state.ticketSel = null;
+  mostrarToast('Ticket marcado como rechazado.');
+  render();
 }
 
 /* =========================================================
@@ -444,10 +505,9 @@ function renderHeader(){
 function renderVistaSolicitante(){
   const f = state.form;
   const sla = calcularFechaSLA({ esAjuste:f.esAjuste, urgente:f.urgente, nivelId:f.nivel });
-  const misFolios = getMisFolios();
-  const misTickets = state.tickets
-    .filter(t => misFolios.includes(t.folio))
-    .filter(t => !state.busqueda || JSON.stringify(t).toLowerCase().includes(state.busqueda.toLowerCase()));
+  let listaTickets = state.tickets.filter(t => state.filtroSucursal === 'Todas' || t.sucursal === state.filtroSucursal);
+  listaTickets = listaTickets.filter(t => !state.busqueda || JSON.stringify(t).toLowerCase().includes(state.busqueda.toLowerCase()));
+  listaTickets.sort((a, b) => new Date(b.fechaHora) - new Date(a.fechaHora));
 
   return `
   <main class="no-print max-w-7xl mx-auto p-4 md:p-6">
@@ -526,14 +586,19 @@ function renderVistaSolicitante(){
      </div>
 
      <div class="lg:col-span-7 space-y-5">
-       <div class="bg-white border border-slate-200 p-4 rounded-[20px] flex gap-3 items-center shadow-sm">
+       <div class="bg-white border border-slate-200 p-4 rounded-[20px] flex flex-wrap gap-3 items-center shadow-sm">
          <span>🔍</span>
-         <input id="input-busqueda" data-field="busqueda" value="${escapeHtml(state.busqueda)}" placeholder="Buscar en mis solicitudes..." class="w-full bg-transparent text-sm font-bold focus:outline-none" />
+         <input id="input-busqueda" data-field="busqueda" value="${escapeHtml(state.busqueda)}" placeholder="Buscar folio, sucursal, solicitante..." class="flex-1 bg-transparent text-sm font-bold focus:outline-none min-w-[120px]" />
+         <select data-field="filtroSucursal" class="bg-slate-100 border-none rounded-xl p-2 text-xs font-black outline-none">
+           <option value="Todas">Todas las sucursales</option>
+           ${SUCURSALES.map(s => `<option value="${s}" ${state.filtroSucursal===s?'selected':''}>${s}</option>`).join('')}
+         </select>
        </div>
+       <p class="text-[9px] font-bold text-slate-400 px-1">Se muestran todas las solicitudes del equipo para que puedan ver la carga de trabajo actual.</p>
        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-         ${misTickets.length === 0
-            ? `<div class="col-span-2 text-center text-slate-400 text-xs font-bold py-10">Aún no has hecho solicitudes desde este dispositivo.</div>`
-            : misTickets.map(t => renderTarjetaSolicitante(t)).join('')}
+         ${listaTickets.length === 0
+            ? `<div class="col-span-2 text-center text-slate-400 text-xs font-bold py-10">No hay solicitudes que coincidan.</div>`
+            : listaTickets.map(t => renderTarjetaSolicitante(t)).join('')}
        </div>
      </div>
    </div>
@@ -595,6 +660,8 @@ function renderVistaProduccion(){
   });
 
   const urgentesActivos = lista.filter(t => t.urgente === 'SI' && t.estado !== 'Entregado').length;
+  const ocultos = lista.filter(t => t.estado === 'Entregado' || t.estado === 'Rechazado').length;
+  const columnas = state.ocultarCompletados ? ESTADOS.filter(e => e.id !== 'Entregado' && e.id !== 'Rechazado') : ESTADOS;
 
   return `
   <main class="no-print max-w-[1600px] mx-auto p-4 md:p-6 space-y-5">
@@ -618,12 +685,16 @@ function renderVistaProduccion(){
           <option value="complejidad_baja" ${state.orden==='complejidad_baja'?'selected':''}>Ordenar: sencillo primero</option>
           <option value="fecha" ${state.orden==='fecha'?'selected':''}>Ordenar: más antiguo primero</option>
         </select>
+        <label class="flex items-center gap-1.5 text-[10px] font-black text-slate-500 bg-slate-100 rounded-xl px-2.5 py-2 cursor-pointer">
+          <input type="checkbox" data-field="ocultarCompletados" ${state.ocultarCompletados?'checked':''} class="rounded accent-black" />
+          Ocultar terminados${ocultos>0 ? ` (${ocultos})` : ''}
+        </label>
         <button data-action="salir-panel" class="text-[10px] font-black text-slate-400 hover:text-black">Salir</button>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-5 gap-4 overflow-x-auto pb-6">
-      ${ESTADOS.map(est => `
+    <div class="grid grid-cols-1 md:grid-cols-${columnas.length} gap-4 overflow-x-auto pb-6">
+      ${columnas.map(est => `
         <div class="min-w-[270px] bg-white border border-slate-100 rounded-[26px] p-4 max-h-[75vh] flex flex-col shadow-sm">
           <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-100">
             <span class="text-[10px] font-black uppercase">${est.label}</span>
@@ -664,7 +735,7 @@ function renderTarjetaProduccion(t){
       <span class="text-[10px] font-black text-emerald-600 font-mono">${t.fechaEntregaEstimada}</span>
       <div class="flex gap-1.5">
         <button data-action="abrir-ticket" data-folio="${t.folio}" class="p-1.5 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-black">📄</button>
-        <button data-action="avanzar-estado" data-folio="${t.folio}" class="p-1.5 bg-black text-[#fed303] rounded-lg">→</button>
+        ${(t.estado !== 'Entregado' && t.estado !== 'Rechazado') ? `<button data-action="avanzar-estado" data-folio="${t.folio}" class="p-1.5 bg-black text-[#fed303] rounded-lg">→</button>` : ''}
       </div>
     </div>
   </div>`;
@@ -715,6 +786,7 @@ function renderModalTicket(t){
   const esDisenador = state.vista === 'produccion' && state.panelAuth;
   const nivel = NIVELES.find(n => n.id === t.complejidad);
   const mostrandoComentario = state.mostrarComentario === t.folio;
+  const mostrandoRechazo = state.mostrarRechazo === t.folio;
   return `
   <div class="no-print fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
     <div class="bg-white rounded-[32px] max-w-4xl w-full p-6 md:p-8 shadow-2xl relative my-8">
@@ -724,9 +796,14 @@ function renderModalTicket(t){
           <div class="bg-white p-5 border-2 border-slate-900 border-dashed font-mono text-[10px] leading-relaxed">
             <div class="whitespace-pre text-slate-800">${generarRecibo(t)}</div>
           </div>
-          ${t.capturaURL
-            ? `<div class="border border-slate-200 rounded-2xl overflow-hidden"><img src="${t.capturaURL}" class="w-full object-contain max-h-72 bg-slate-50" alt="Captura del diseño" /></div>`
-            : `<div class="text-[10px] font-bold text-slate-400 text-center py-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">Sin captura subida todavía.</div>`}
+          ${state.previewLocal
+            ? `<div class="border border-slate-200 rounded-2xl overflow-hidden relative">
+                 <img src="${state.previewLocal}" class="w-full object-contain max-h-72 bg-slate-50" alt="Vista previa" />
+                 ${state.subiendoCaptura ? `<div class="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-[10px] font-black uppercase">Subiendo...</div>` : ''}
+               </div>`
+            : (t.capturaURL
+                ? `<div class="border border-slate-200 rounded-2xl overflow-hidden"><img src="${t.capturaURL}" class="w-full object-contain max-h-72 bg-slate-50" alt="Captura del diseño" /></div>`
+                : `<div class="text-[10px] font-bold text-slate-400 text-center py-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">Sin captura subida todavía.</div>`)}
           ${t.comentarioSolicitante ? `<div class="text-[10px] bg-purple-50 text-purple-700 border border-purple-200 rounded-xl p-3"><strong>Comentario del solicitante:</strong> ${escapeHtml(t.comentarioSolicitante)}</div>` : ''}
         </div>
 
@@ -738,6 +815,7 @@ function renderModalTicket(t){
             ${nivel ? `<span class="inline-block ${nivel.color} px-3 py-1 rounded-full text-[9px] font-black uppercase mt-2 ml-1">${nivel.label}</span>` : ''}
             <p class="text-[10px] font-bold text-slate-400 border-t border-white/10 pt-3 mt-3">Entrega prometida: <span class="text-white font-mono">${t.fechaEntregaEstimada}</span></p>
             ${t.motivoAjusteFecha ? `<p class="text-[9px] text-amber-300 mt-1">Motivo del ajuste: ${escapeHtml(t.motivoAjusteFecha)}</p>` : ''}
+            ${t.motivoRechazo ? `<p class="text-[9px] text-red-300 mt-1">Motivo del rechazo: ${escapeHtml(t.motivoRechazo)}</p>` : ''}
           </div>
 
           ${esDisenador ? `
@@ -754,17 +832,37 @@ function renderModalTicket(t){
             <label class="text-[9px] font-black uppercase text-slate-400 block">Subir captura del diseño</label>
             <input type="file" accept="image/*" data-action="captura-file" data-folio="${t.folio}" class="text-[10px] font-bold w-full" />
             ${state.subiendoCaptura ? `<p class="text-[9px] font-bold text-slate-400">Subiendo captura...</p>` : ''}
+            ${t.estado !== 'Rechazado' ? (
+              mostrandoRechazo ? `
+                <div class="space-y-2 pt-2 border-t border-slate-200">
+                  <label class="text-[9px] font-black uppercase text-red-500 block">Motivo del rechazo</label>
+                  <textarea id="input-motivo-rechazo" data-field="motivoRechazoTexto" rows="2" class="${CLS_INPUT}" placeholder="Ej. Duplicado, fuera de alcance...">${escapeHtml(state.motivoRechazoTexto)}</textarea>
+                  <div class="grid grid-cols-2 gap-2">
+                    <button data-action="cancelar-rechazo" class="bg-slate-200 text-slate-600 font-black py-2 rounded-xl text-[10px] uppercase">Cancelar</button>
+                    <button data-action="confirmar-rechazo" data-folio="${t.folio}" class="bg-red-500 text-white font-black py-2 rounded-xl text-[10px] uppercase">Confirmar rechazo</button>
+                  </div>
+                </div>
+              ` : `<button data-action="abrir-rechazo" data-folio="${t.folio}" class="w-full text-[10px] font-black text-red-500 uppercase pt-1">✕ Rechazar este ticket</button>`
+            ) : ''}
+            <button data-action="eliminar-ticket" data-folio="${t.folio}" class="w-full text-[10px] font-black text-slate-400 uppercase pt-2 border-t border-slate-200 mt-2 hover:text-red-500">🗑 Eliminar ticket</button>
           </div>` : `
           <div class="space-y-2">
-            ${t.estado === 'En Revisión' && !t.fechaAprobacion ? (
-              mostrandoComentario ? `
-                <textarea id="input-comentario-modal" data-field="comentarioModal" class="${CLS_INPUT}" rows="3" placeholder="Describe qué cambios necesitas...">${escapeHtml(state.comentarioModal || '')}</textarea>
-                <button data-action="enviar-cambios" data-folio="${t.folio}" class="w-full bg-purple-600 text-white font-black py-3 rounded-2xl text-[11px] uppercase">Enviar cambios solicitados</button>
-              ` : `
-                <button data-action="aprobar" data-folio="${t.folio}" class="w-full bg-emerald-500 text-white font-black py-3 rounded-2xl text-[11px] uppercase">✔ Aprobar diseño</button>
-                <button data-action="abrir-pedir-cambios" data-folio="${t.folio}" class="w-full bg-slate-100 text-slate-600 font-black py-3 rounded-2xl text-[11px] uppercase">Pedir cambios</button>
-              `
-            ) : (t.estado === 'Entregado' ? `<p class="text-center text-[10px] font-bold text-emerald-600">Diseño entregado y aprobado.</p>` : `<p class="text-center text-[10px] font-bold text-slate-400">Tu diseño sigue en proceso. Te avisaremos cuando esté listo para revisión.</p>`)}
+            ${state.modoEdicion ? renderFormularioEdicion(t) : (
+              t.estado === 'En Fila de Espera' ? `
+                <button data-action="iniciar-edicion" data-folio="${t.folio}" class="w-full bg-slate-100 text-slate-700 font-black py-3 rounded-2xl text-[11px] uppercase">✎ Editar solicitud</button>
+                <button data-action="eliminar-ticket" data-folio="${t.folio}" class="w-full bg-red-50 text-red-600 font-black py-3 rounded-2xl text-[11px] uppercase">🗑 Eliminar solicitud</button>
+              ` : (t.estado === 'En Revisión' && !t.fechaAprobacion ? (
+                mostrandoComentario ? `
+                  <textarea id="input-comentario-modal" data-field="comentarioModal" class="${CLS_INPUT}" rows="3" placeholder="Describe qué cambios necesitas...">${escapeHtml(state.comentarioModal || '')}</textarea>
+                  <button data-action="enviar-cambios" data-folio="${t.folio}" class="w-full bg-purple-600 text-white font-black py-3 rounded-2xl text-[11px] uppercase">Enviar cambios solicitados</button>
+                ` : `
+                  <button data-action="aprobar" data-folio="${t.folio}" class="w-full bg-emerald-500 text-white font-black py-3 rounded-2xl text-[11px] uppercase">✔ Aprobar diseño</button>
+                  <button data-action="abrir-pedir-cambios" data-folio="${t.folio}" class="w-full bg-slate-100 text-slate-600 font-black py-3 rounded-2xl text-[11px] uppercase">Pedir cambios</button>
+                `
+              ) : (t.estado === 'Entregado' ? `<p class="text-center text-[10px] font-bold text-emerald-600">Diseño entregado y aprobado.</p>`
+                   : t.estado === 'Rechazado' ? `<p class="text-center text-[10px] font-bold text-red-500">Este ticket fue rechazado.</p>`
+                   : `<p class="text-center text-[10px] font-bold text-slate-400">Tu diseño sigue en proceso. Te avisaremos cuando esté listo para revisión.</p>`))
+            )}
           </div>`}
 
           <div class="grid grid-cols-2 gap-2 mt-auto">
@@ -773,6 +871,30 @@ function renderModalTicket(t){
           </div>
         </div>
       </div>
+    </div>
+  </div>`;
+}
+
+function renderFormularioEdicion(t){
+  const e = state.edicion;
+  const esAjuste = t.esAjuste === 'SI';
+  return `
+  <div class="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+    <textarea id="input-edicion-descripcion" data-field="edicion.descripcion" rows="3" class="${CLS_INPUT}" placeholder="Descripción">${escapeHtml(e.descripcion)}</textarea>
+    <input id="input-edicion-referencia" data-field="edicion.referencia" value="${escapeHtml(e.referencia)}" class="${CLS_INPUT}" placeholder="Link de referencia" />
+    ${!esAjuste ? `
+    <div>
+      <label class="text-[9px] font-black uppercase text-slate-400 block mb-1">Nivel de complejidad</label>
+      <div class="grid grid-cols-2 gap-2">
+        ${NIVELES.map(n => `<button type="button" data-action="set-nivel-edicion" data-nivel="${n.id}" class="text-left p-2 rounded-xl border-2 text-[9px] font-black ${e.nivel===n.id?'border-black bg-white':'border-slate-100 bg-white opacity-50'}">${n.label}</button>`).join('')}
+      </div>
+    </div>` : ''}
+    <label class="flex items-center gap-2 text-[10px] font-black cursor-pointer">
+      <input type="checkbox" data-field="edicion.urgente" ${e.urgente?'checked':''} class="rounded accent-black" /> <span>Marcar como urgente</span>
+    </label>
+    <div class="grid grid-cols-2 gap-2">
+      <button data-action="cancelar-edicion" class="bg-slate-200 text-slate-600 font-black py-2.5 rounded-xl text-[10px] uppercase">Cancelar</button>
+      <button data-action="guardar-edicion" data-folio="${t.folio}" class="bg-black text-[#fed303] font-black py-2.5 rounded-xl text-[10px] uppercase">Guardar</button>
     </div>
   </div>`;
 }
@@ -804,7 +926,15 @@ document.addEventListener('change', e => {
     render();
   }
   const action = e.target.dataset.action;
-  if(action === 'captura-file') manejarCaptura(e.target.dataset.folio, e.target.files[0]);
+  if(action === 'captura-file'){
+    const file = e.target.files[0];
+    if(file){
+      if(state.previewLocal) URL.revokeObjectURL(state.previewLocal);
+      state.previewLocal = URL.createObjectURL(file);
+      render();
+      manejarCaptura(e.target.dataset.folio, file);
+    }
+  }
   if(action === 'asignar-disenador') asignarDisenador(e.target.dataset.folio, e.target.value);
   if(action === 'cambiar-estado-manual') actualizarCampos(e.target.dataset.folio, { estado: e.target.value });
 });
@@ -821,13 +951,32 @@ document.addEventListener('click', e => {
   else if(a === 'enviar-solicitud'){ enviarSolicitud(false); }
   else if(a === 'confirmar-urgente'){ enviarSolicitud(true); }
   else if(a === 'cancelar-urgente'){ state.advertenciaUrgencia = false; render(); }
-  else if(a === 'abrir-ticket'){ state.ticketSel = state.tickets.find(t => t.folio === folio); state.mostrarComentario = null; state.comentarioModal = ''; render(); }
-  else if(a === 'cerrar-modal'){ state.ticketSel = null; state.mostrarComentario = null; state.comentarioModal = ''; render(); }
+  else if(a === 'abrir-ticket'){
+    state.ticketSel = state.tickets.find(t => t.folio === folio);
+    state.mostrarComentario = null; state.comentarioModal = '';
+    state.modoEdicion = false; state.mostrarRechazo = null; state.motivoRechazoTexto = '';
+    if(state.previewLocal){ URL.revokeObjectURL(state.previewLocal); state.previewLocal = null; }
+    render();
+  }
+  else if(a === 'cerrar-modal'){
+    state.ticketSel = null; state.mostrarComentario = null; state.comentarioModal = '';
+    state.modoEdicion = false; state.mostrarRechazo = null; state.motivoRechazoTexto = '';
+    if(state.previewLocal){ URL.revokeObjectURL(state.previewLocal); state.previewLocal = null; }
+    render();
+  }
   else if(a === 'refrescar'){ refrescar(false); }
   else if(a === 'avanzar-estado'){ avanzarEstado(folio); }
   else if(a === 'aprobar'){ aprobarDiseno(folio); state.ticketSel = null; render(); }
   else if(a === 'abrir-pedir-cambios'){ state.mostrarComentario = folio; render(); }
   else if(a === 'enviar-cambios'){ pedirCambios(folio, state.comentarioModal || ''); state.mostrarComentario = null; state.comentarioModal = ''; state.ticketSel = null; render(); }
+  else if(a === 'iniciar-edicion'){ const t = state.tickets.find(x => x.folio === folio); if(t) iniciarEdicion(t); }
+  else if(a === 'cancelar-edicion'){ cancelarEdicion(); }
+  else if(a === 'guardar-edicion'){ guardarEdicion(folio); }
+  else if(a === 'set-nivel-edicion'){ state.edicion.nivel = btn.dataset.nivel; render(); }
+  else if(a === 'eliminar-ticket'){ eliminarTicket(folio); }
+  else if(a === 'abrir-rechazo'){ abrirRechazo(folio); }
+  else if(a === 'cancelar-rechazo'){ cancelarRechazo(); }
+  else if(a === 'confirmar-rechazo'){ confirmarRechazo(folio); }
   else if(a === 'imprimir'){ window.print(); }
   else if(a === 'whatsapp'){
     const t = state.tickets.find(x => x.folio === folio);
