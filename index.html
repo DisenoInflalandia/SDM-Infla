@@ -25,8 +25,14 @@ input,select,textarea{font-family:var(--body);font-size:16px;color:inherit}
 a{color:inherit}
 
 /* ===== LOGIN ===== */
-#login{position:fixed;inset:0;z-index:80;background:var(--sur);overflow:auto;display:flex;align-items:center;justify-content:center;padding:40px 20px}
-.lwrap{width:100%;max-width:480px}
+/* align-items:flex-start + margin:auto 0 en .lwrap (en vez de align-items:center
+   en el contenedor) centra el formulario verticalmente cuando cabe, pero en una
+   pantalla baja (celular chico, modo horizontal, o con el teclado abierto) deja
+   que el contenido empiece arriba y se pueda desplazar completo: con
+   align-items:center puro, si el formulario no cabe, el navegador recorta por
+   igual arriba y abajo y una parte queda inalcanzable aunque se haga scroll. */
+#login{position:fixed;inset:0;z-index:80;background:var(--sur);overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px}
+.lwrap{width:100%;max-width:480px;margin:auto 0}
 .mark{display:inline-flex;align-items:center;gap:10px;margin-bottom:34px}
 .mark .sq{width:32px;height:32px;border-radius:9px;background:var(--acc);display:flex;align-items:center;justify-content:center;flex:none}
 .duck{width:19px;height:19px;display:block}
@@ -319,8 +325,13 @@ tr.out td:nth-child(2){text-decoration:line-through}
   .zb{width:auto;flex:none;white-space:nowrap;background:var(--line2);margin-bottom:0}
   main{padding:26px 18px 130px}
   .hbar{min-height:0;padding:12px 16px;flex-wrap:wrap;gap:12px}
-  .tabs{order:3;width:100%;overflow-x:auto;padding-bottom:2px}
-  .tab{flex:none}
+  /* flex-wrap:nowrap es necesario: .tabs hereda flex-wrap:wrap de la regla base,
+     y con eso los botones se brincaban a una segunda línea en vez de formar una
+     sola tira horizontal con scroll (que es lo que overflow-x:auto ya buscaba
+     lograr). Con nowrap, las 2-5 pestañas quedan en una sola fila deslizable,
+     más fácil de usar con el pulgar en el celular. */
+  .tabs{order:3;width:100%;overflow-x:auto;overflow-y:hidden;flex-wrap:nowrap;padding-bottom:2px}
+  .tab{flex:none;min-height:44px}
   .who{display:none}
   .hright{margin-left:0;width:100%}
   .keybtn{flex:1;text-align:center;justify-content:center}
@@ -535,10 +546,11 @@ tr.out td:nth-child(2){text-decoration:line-through}
   <h3>Solicitud extemporánea</h3>
   <p>El periodo está cerrado. Pide un código al área de diseño y captúralo aquí para poder enviar tu solicitud.</p>
   <p style="font-size:14px">El código sirve una sola vez y tu solicitud pasará a revisión igual que las del ciclo normal.</p>
-  <div class="fld"><label for="cIn">Código</label><input class="ctrl" id="cIn" placeholder="XXXX-XXXX" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase"></div>
+  <div class="fld"><label for="cIn">Código</label><input class="ctrl" id="cIn" placeholder="XXXX-XXXX" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase" onkeydown="if(event.key==='Enter'){event.preventDefault();usarCodigo()}"></div>
+  <p class="cap" style="font-size:13px;margin-top:-4px">No importa si lo escribes con mayúsculas o minúsculas, ni si le pones o le quitas el guion — solo copia las letras y números que te dieron.</p>
   <p id="cErr" hidden style="color:var(--err);font-size:14px"></p>
   <div class="rowbtn"><button class="btn btn-out" style="flex:1" onclick="closeM('mCodigo')">Cancelar</button>
-    <button class="btn btn-acc" style="flex:1" onclick="usarCodigo()">Validar código</button></div>
+    <button class="btn btn-acc" style="flex:1" id="cBtn" onclick="usarCodigo()">Validar código</button></div>
 </div></div>
 
 <div class="veil" id="mCodeNew"><div class="dlg" style="max-width:440px" role="dialog" aria-modal="true">
@@ -616,6 +628,10 @@ let sols=[],codes=[],editando=null,codigoOK='',esDiseno=false,rolStaff='';
 let histMes='ultima',panelEst='',panelSuc='',panelMes='',abH=new Set(),abP=new Set(),matF={};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* Para comparar códigos de forma tolerante: a los directores les cuesta
+   transcribir exactamente XXXX-XXXX, así que al comparar ignoramos guiones,
+   espacios y mayúsculas/minúsculas (ej. "ab3k9xqp" == "AB3K-9XQP"). */
+const normCode_=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 
 /* ========== PERSISTENCIA ========== */
 let avisoGuardado=false;
@@ -819,16 +835,32 @@ async function pedirCodigo(){
       {codigoOK='';toast('Código liberado');pintaEstado();pintaSol()}
     return}
   $('cIn').value='';$('cErr').hidden=true;openM('mCodigo');setTimeout(()=>$('cIn').focus(),80);
+  // Refresca en segundo plano por si diseño generó el código hace poco:
+  // mientras el director está en el catálogo/solicitud no hay sondeo
+  // automático (pollInicia solo corre en panel/historial/entrega), así que
+  // sin esto el código podía no estar todavía en este navegador.
+  loadRemote(true);
 }
-function usarCodigo(){
-  const v=$('cIn').value.trim().toUpperCase();
+async function usarCodigo(){
+  const v=$('cIn').value.trim();
+  const vN=normCode_(v);
   const err=m=>{$('cErr').textContent=m;$('cErr').hidden=false};
-  const c=codes.find(x=>x.code===v);
-  if(!c)return err('Ese código no existe. Revisa que esté bien escrito.');
+  if(!vN)return err('Escribe el código que te dio diseño.');
+  const btn=$('cBtn');
+  const original=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Verificando…'}
+  $('cErr').hidden=true;
+  await loadRemote(true); // refresca por si el código se generó después de la última sincronización
+  if(btn){btn.disabled=false;btn.textContent=original}
+  // Comparación tolerante a mayúsculas/minúsculas, espacios y guiones
+  // (ej. "ab3k9xqp" encuentra "AB3K-9XQP"), para que un error de captura
+  // del director no se lea como "código inexistente".
+  const c=codes.find(x=>normCode_(x.code)===vN);
+  if(!c)return err('Ese código no existe. Revisa que esté bien escrito, o pide uno nuevo a diseño (puede que el que tienes ya no esté disponible en este dispositivo — vuelve a intentar).');
   if(c.usado)return err('Ese código ya se usó en la solicitud '+c.usado+'.');
   if(new Date(c.expira)<new Date())return err('Ese código caducó el '+fdate(c.expira)+'. Pide uno nuevo a diseño.');
   if(c.suc&&c.suc!==S)return err('Ese código es para '+plazaDe(c.suc)+', no para '+plazaDe(S)+'.');
-  codigoOK=v;closeM('mCodigo');pintaEstado();pintaSol();
+  codigoOK=c.code;closeM('mCodigo');pintaEstado();pintaSol();
   toast('Código válido · ya puedes enviar');
 }
 function pintaEstado(){
