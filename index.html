@@ -697,6 +697,19 @@ function pintaSync(){
   el.className='status '+(cls==='ok'?'open':cls==='err'?'shut':'');
   el.textContent=txt;
 }
+/* Mientras diseño/CEDIS está validando una solicitud (tildando checks,
+   cambiando el estado…) puede haber un guardado todavía en camino al
+   servidor cuando llega el siguiente sondeo de 25s. Si en ese momento
+   reemplazáramos sols/codes de golpe con lo que diga el servidor, se
+   perdería justo el cambio que apenas se mandó (el servidor aún no lo
+   tenía al momento de responder el GET) — eso es el "se borra al
+   actualizar" que reportaron. _pendingFolios/_pendingCodes llevan la
+   cuenta de qué folios/códigos tienen un guardado sin confirmar, y
+   mientras eso sea cierto, loadRemote conserva la versión local de
+   ESE folio/código en vez de la del servidor (todo lo demás sí se
+   actualiza con normalidad).
+*/
+let _pendingFolios=new Set(), _pendingCodes=new Set();
 async function loadRemote(silencioso){
   if(!SHEETS_URL)return;
   syncEstado='sincronizando';pintaSync();
@@ -704,8 +717,20 @@ async function loadRemote(silencioso){
     const res=await fetch(SHEETS_URL);
     const data=await res.json();
     if(!data.ok)throw new Error(data.error||'error del servidor');
-    sols=(data.solicitudes||[]).map(migrarSol_);
-    codes=data.codes||[];
+    const solLocalPorFolio={};sols.forEach(s=>solLocalPorFolio[s.folio]=s);
+    const codLocalPorCode={};codes.forEach(c=>codLocalPorCode[c.code]=c);
+    let entrantes=(data.solicitudes||[]).map(migrarSol_);
+    if(_pendingFolios.size){
+      entrantes=entrantes.map(s=>_pendingFolios.has(s.folio)&&solLocalPorFolio[s.folio]?solLocalPorFolio[s.folio]:s);
+      _pendingFolios.forEach(f=>{if(solLocalPorFolio[f]&&!entrantes.some(s=>s.folio===f))entrantes.push(solLocalPorFolio[f])});
+    }
+    sols=entrantes;
+    let codesEntrantes=data.codes||[];
+    if(_pendingCodes.size){
+      codesEntrantes=codesEntrantes.map(c=>_pendingCodes.has(c.code)&&codLocalPorCode[c.code]?codLocalPorCode[c.code]:c);
+      _pendingCodes.forEach(cc=>{if(codLocalPorCode[cc]&&!codesEntrantes.some(c=>c.code===cc))codesEntrantes.push(codLocalPorCode[cc])});
+    }
+    codes=codesEntrantes;
     save();
     syncEstado='ok';syncTs=new Date().toISOString();
     if(vista==='hist')renderHist();
@@ -718,23 +743,46 @@ async function loadRemote(silencioso){
   }
   pintaSync();
 }
+/* Cada checkbox/cambio de estado dispara su propio guardado sin esperar al
+   anterior (para que la pantalla no se sienta trabada). Si dos de esos
+   guardados para la MISMA solicitud llegan al servidor fuera de orden —
+   muy posible con Apps Script, cuya latencia varía — el que termina de
+   procesarse al final "gana" y puede sobrescribir con una versión más
+   vieja los cambios de un guardado más reciente que ya había llegado.
+   _pushChain encola los guardados de cada folio uno tras otro (nunca dos
+   al mismo tiempo para el mismo folio), así siempre se procesan y
+   confirman en el mismo orden en que se hicieron los cambios. */
+const _pushChain={};
 function pushSol(sol,isNew){
   if(!SHEETS_URL)return;
-  fetch(SHEETS_URL,{method:'POST',body:JSON.stringify({action:isNew?'guardar':'actualizar',solicitud:sol})})
+  const folio=sol.folio,body=JSON.stringify({action:isNew?'guardar':'actualizar',solicitud:sol});
+  _pendingFolios.add(folio);
+  const previo=_pushChain[folio]||Promise.resolve();
+  const corrida=previo.catch(()=>{}).then(()=>fetch(SHEETS_URL,{method:'POST',body})
     .then(()=>{syncEstado='ok';syncTs=new Date().toISOString();pintaSync()})
-    .catch(()=>{syncEstado='error';pintaSync()});
+    .catch(()=>{syncEstado='error';pintaSync()})
+    .finally(()=>{if(_pushChain[folio]===corrida)_pendingFolios.delete(folio)}));
+  _pushChain[folio]=corrida;
+  return corrida;
 }
 const _debTimers={};
 function pushSolDebounced(sol){
   if(!SHEETS_URL)return;
+  _pendingFolios.add(sol.folio);
   clearTimeout(_debTimers[sol.folio]);
   _debTimers[sol.folio]=setTimeout(()=>pushSol(sol,false),900);
 }
 function pushCode(cod,isNew){
   if(!SHEETS_URL)return;
-  fetch(SHEETS_URL,{method:'POST',body:JSON.stringify({action:isNew?'guardarCodigo':'actualizarCodigo',codigo:cod})})
+  const code=cod.code,body=JSON.stringify({action:isNew?'guardarCodigo':'actualizarCodigo',codigo:cod});
+  _pendingCodes.add(code);
+  const previo=_pushChain['cod:'+code]||Promise.resolve();
+  const corrida=previo.catch(()=>{}).then(()=>fetch(SHEETS_URL,{method:'POST',body})
     .then(()=>{syncEstado='ok';syncTs=new Date().toISOString();pintaSync()})
-    .catch(()=>{syncEstado='error';pintaSync()});
+    .catch(()=>{syncEstado='error';pintaSync()})
+    .finally(()=>{if(_pushChain['cod:'+code]===corrida)_pendingCodes.delete(code)}));
+  _pushChain['cod:'+code]=corrida;
+  return corrida;
 }
 let _pollTimer=null;
 function pollInicia(){
